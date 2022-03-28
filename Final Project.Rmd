@@ -1,0 +1,355 @@
+---
+title: "Final Project"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r}
+# housekeeping
+# rm(list=ls())
+graphics.off()
+
+library(tidyverse)
+library(caret)
+library(corrplot)
+library(MASS)
+library(rpart)
+library(rpart.plot)
+library(e1071)
+library(fpp3)
+library(rminer)
+```
+
+```{r}
+# total data after precess, one observation per block
+data <- read.csv('0to10999999_Block.csv')
+data <- data[ ,!(names(data) %in% c("X"))]
+```
+
+```{r}
+View(data)
+names(data)
+str(data)
+```
+
+```{r}
+# change to one observation per day
+day_data <- data %>% 
+  group_by(date=as_date(as.POSIXlt(timestamp, origin="1970-01-01"))) %>%
+  summarise(reward=sum(reward), 
+            size=sum(size), 
+            difficulty=mean(difficulty),
+            transactionCount=sum(transactionCount), 
+            gasLimit=mean(gasLimit), 
+            gasUsed=sum(gasUsed),
+            avgGasPrice=mean(avgGasPrice),
+            txFee=sum(txFee),
+            blockCount=n(),
+            abt=(max(timestamp) - min(timestamp)) / (n() - 1)) %>%
+  as_tsibble(index=date) 
+
+View(day_data)
+head(day_data)
+```
+
+```{r}
+str(day_data)
+```
+
+```{r}
+#plot color scaled correlation matrix
+mcor<-round(cor(day_data[ , -c(1)]),5)
+corrplot(mcor, type = "upper", order = "AOE", tl.col = "black", tl.srt = 45,
+         title = "Correlation Matrix", mar=c(0,0,1,0))
+```
+
+```{r}
+# histogram reward
+day_data %>% 
+  ggplot(aes(reward)) +
+  geom_histogram() +
+  theme(panel.background = element_blank(), axis.line = element_line(color = "Black"))+
+  labs(title = "Distribution of reward",
+       x="reward", 
+       y="count")
+```
+
+```{r}
+# reward and date
+day_data %>% 
+  ggplot(aes(y=reward, x=date)) +
+  geom_point(color="#2a9d8f", alpha=0.7) +
+  theme(panel.background = element_blank(), axis.line = element_line(color = "Black"))+
+  labs(title = "Distribution of reward", x="date", y="reward")
+```
+
+```{r}
+# (a) Block Counts vs Rewards
+
+day_data %>% 
+  ggplot(aes(y=reward, x=blockCount)) +
+  geom_point(color="#2a9d8f", alpha=0.7) +
+  geom_abline(intercept = 0, slope = 5e18, col="red") +
+  geom_abline(intercept = 0, slope = 3e18, col="red") +
+  geom_abline(intercept = 0, slope = 2e18, col="red") +
+  theme(panel.background = element_blank(), axis.line = element_line(color = "Black"))+
+  labs(title = "Relationship between block count and reward",
+       x="Block Count", 
+       y="Reward")
+
+```
+
+```{r}
+summary(lm(log(reward) ~ blockCount, data=day_data))
+```
+
+
+```{r}
+# (b) Transaction Count vs Block-Size
+slope <- min(day_data$size / day_data$transactionCount)
+
+
+day_data %>% 
+  ggplot(aes(y=size, x=transactionCount)) +
+  geom_point(color="#2a9d8f", alpha=0.7) +
+  geom_abline(intercept = 0, slope = slope, col="red") +
+  coord_flip() +
+  theme(panel.background = element_blank(), axis.line = element_line(color = "Black"))+
+  labs(title = "Relationship between Block-Size and Transaction Count",
+       x="Transaction Count", 
+       y="Block-Size")
+
+```
+
+```{r}
+summary(lm(size ~ transactionCount, data=day_data))
+```
+
+
+```{r}
+# (c) Average Block-Time vs Block-Difficulty
+
+day_data %>% 
+  ggplot(aes(y=difficulty, x=abt)) +
+  geom_point(color="#2a9d8f", alpha=0.7) +
+  geom_vline(xintercept = 13, col="red") +
+  theme(panel.background = element_blank(), axis.line = element_line(color = "Black"))+
+  labs(title = "Relationship between Block-Difficulty and Average Block-Time",
+       x="Average Block-Time", 
+       y="Block-Difficulty")
+
+```
+
+```{r}
+summary(lm(difficulty ~ abt, data=day_data))
+```
+
+```{r}
+# only selet reward == 2,3,5
+datac <- data %>%
+  filter((reward == 5.00000e+18) | (reward == 3.00000e+18) | (reward == 2.00000e+18))
+
+# change reward to labe
+datac$reward = factor(datac$reward)
+ 
+# only take 1% of the total data
+trainingc <- datac$reward %>%
+   createDataPartition(p=0.01, list=F)
+
+data_c <- datac[trainingc, ]
+
+# train test split for classification(data per block) 
+trainingc <- data_c$reward %>%
+  createDataPartition(p=0.8, list=F)
+
+trainc <- data_c[trainingc, ]
+testc <- data_c[-trainingc, ]
+```
+
+```{r}
+# fit the decision tree
+fit1 <- fit(reward~.,data=trainc,model="dt")
+P1<-predict(fit1,testc)
+result<-colnames(P1)[apply(P1,1,which.max)]
+table(result,testc$reward)
+```
+
+```{r}
+# plot the decision tree
+rpart.plot(fit1@object, box.palette="RdBu", shadow.col="gray", nn=TRUE, main = "Decision tree")
+```
+
+```{r}
+# train test split for regression(data per day)
+set.seed(123)
+
+training <- day_data$reward %>%
+  createDataPartition(p=0.8, list=F)
+
+train <- day_data[training, ]
+test <- day_data[-training, ]
+```
+
+```{r}
+# regression using lr
+lr <- lm(reward / 1e22 ~ . - date, data=train)
+summary(lr)
+
+predictions <- lr %>% predict(test)
+
+# Model performance
+
+sqrt(mean((predictions - test$reward / 1e22)^2, na.rm=TRUE))
+data.frame(
+  RMSE = RMSE(predictions, test$reward / 1e22),
+  R2 = R2(predictions, test$reward / 1e22)
+)
+
+```
+
+```{r}
+ggplot() + 
+  geom_line(aes(x=date, y= reward / 1e22), data = test, col="red") + 
+  geom_line(aes(x=test$date, y=predictions), col="darkgreen") +
+  labs(title = "Linear regression predicted reward(green line) and the actual reward(red line)",x="date", y="reward / 1e22")
+```
+
+
+```{r}
+# regression using decision tree
+dt <- rpart(reward / 1e22 ~ . - date, method = "anova", data = train)
+summary(dt)
+
+predictions2 <- predict(dt, test, method = "anova") 
+
+rpart.plot(dt, box.palette="RdBu", shadow.col="gray", nn=T) # plot decision tree
+```
+
+```{r}
+sqrt(mean((predictions2 - test$reward / 1e22)^2, na.rm=TRUE))
+
+data.frame(
+  #RMSE = sqrt(mean((predictions - test$reward / 1e22)^2, na.rm=TRUE)),
+  RMSE = RMSE(predictions2, test$reward / 1e22),
+  R2 = R2(predictions2, test$reward / 1e22)
+)
+```
+
+```{r}
+ggplot() + 
+  geom_line(aes(x=date, y=reward / 1e22), data = test, col="red") + 
+  geom_line(aes(x=test$date, y=predictions2), col="darkgreen") +
+  labs(title = "Decision tree predicted reward(green line) and the actual reward(red line)",x="date", y="reward / 1e22")
+```
+
+
+```{r}
+# regression using svr
+svr <- svm(formula = log(reward) ~ . - date, data = train, type = "eps-regression")
+summary(svr)
+```
+
+```{r}
+predictions = predict(svr, test)
+
+sqrt(mean((predictions - log(test$reward))^2, na.rm=TRUE))
+
+data.frame(
+  RMSE = RMSE(predictions, log(test$reward)),
+  R2 = R2(predictions, log(test$reward))
+)
+
+# ggplot() + geom_point(aes(x=log(test$reward), y=y_pred))
+
+```
+
+```{r}
+ggplot() + 
+  geom_line(aes(x=date, y=log(reward)), data = test, col="red") + 
+  geom_line(aes(x=test$date, y=predictions), col="darkgreen") +
+  labs(title = "SVM regression  predicted reward and the actual reward",x="date", y="reward")
+```
+
+```{r}
+day_data %>% 
+  ggplot(aes(y=reward / 1e20, x=size)) +
+  geom_point(color="#2a9d8f", alpha=0.7)+
+  geom_smooth(method = lm, se = FALSE) +
+  theme(panel.background = element_blank(), axis.line = element_line(color = "Black"))+
+  labs(title = "What is the relationship of reward with size?",
+       x="size", 
+       y="reward")
+```
+
+```{r}
+day_data %>% 
+  #filter(difficulty <= 2.5e14) %>% 
+  ggplot(aes(y=reward / 1e20, x=difficulty / 1e11)) +
+  geom_point(color="#2a9d8f", alpha=0.7)+
+  geom_smooth(method = lm, se = FALSE) +
+  theme(panel.background = element_blank(), axis.line = element_line(color = "Black"))+
+  labs(title = "What is the relationship of reward with difficulty?",
+       x="difficulty", 
+       y="reward")
+```
+
+
+```{r}
+day_data %>% 
+  ggplot(aes(y=reward / 1e20, x=transactionCount)) +
+  geom_point(color="#2a9d8f", alpha=0.7) +
+  geom_smooth(method = lm, se = FALSE) +
+  theme(panel.background = element_blank(), axis.line = element_line(color = "Black"))+
+  labs(title = "What is the relationship of reward with transactionCount?",
+       x="transactionCount", 
+       y="reward")
+```
+
+```{r}
+day_data %>% 
+  ggplot(aes(y=reward / 1e20, x=gasLimit)) +
+  geom_point(color="#2a9d8f", alpha=0.7) +
+  geom_smooth(method = lm, se = FALSE) +
+  theme(panel.background = element_blank(), axis.line = element_line(color = "Black"))+
+  labs(title = "What is the relationship of reward with gasLimit?",
+       x="gasLimit", 
+       y="reward")
+```
+
+```{r}
+day_data %>% 
+  ggplot(aes(y=reward / 1e20, x=gasUsed / 1e06)) +
+  geom_point(color="#2a9d8f", alpha=0.7) +
+  geom_smooth(method = lm, se = FALSE) +
+  theme(panel.background = element_blank(), axis.line = element_line(color = "Black"))+
+  labs(title = "What is the relationship of reward with gasUsed?",
+       x="gasUsed", 
+       y="reward")
+```
+
+```{r}
+day_data %>% 
+  filter(avgGasPrice <= 5e+12) %>% 
+  ggplot(aes(y=reward / 1e20, x=avgGasPrice / 1e9)) +
+  geom_point(color="#2a9d8f", alpha=0.7) +
+  geom_smooth(method = lm, se = FALSE) +
+  theme(panel.background = element_blank(), axis.line = element_line(color = "Black"))+
+  labs(title = "What is the relationship of reward with avgGasPrice?",
+       x="avgGasPrice", 
+       y="reward")
+```
+
+```{r}
+day_data %>% 
+  #filter(txFee < 1e+21) %>% 
+  ggplot(aes(y=reward / 1e20, x=txFee / 1e18)) +
+  geom_point(color="#2a9d8f", alpha=0.7) +
+  geom_smooth(method = lm, se = FALSE) +
+  theme(panel.background = element_blank(), axis.line = element_line(color = "Black"))+
+  labs(title = "What is the relationship of reward with txFee?",
+       x="txFee", 
+       y="reward")
+```
